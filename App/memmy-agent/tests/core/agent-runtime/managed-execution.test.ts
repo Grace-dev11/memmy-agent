@@ -14,7 +14,7 @@ describe("mandatory managed execution", () => {
     vi.stubEnv("AGENT_MACOS_SANDBOX", "1");
     const response = await createApp().fetch(new Request("http://127.0.0.1/health"));
     expect(await response.json()).toEqual({ status: "ok", permissionProtocol: 1,
-      managedExecutionProtocol: 2, managedExecutionRequired: true, macosSandbox: true });
+      managedExecutionProtocol: 2, managedToolResultProtocol: 1, managedExecutionRequired: true, macosSandbox: true });
   });
 
   it("keeps standalone health independent of managed execution", async () => {

@@ -1,4 +1,5 @@
 import { executeManagedTool, emitManagedToolEvent, managedExecutionRequired, ManagedExecutionError } from "./managed-execution.js";
+import { managedToolResultContent, managedToolResultSummary, parseManagedToolResult } from "./managed-tool-result.js";
 import { requestTiming } from "../../utils/request-timing.js";
 import crypto from "node:crypto";
 import { redactBrowserAuthArguments } from "../../utils/browser-auth-privacy.js";
@@ -1014,14 +1015,15 @@ export class AgentRunner {
       const cached = this.legacyImageResults.get(content);
       if (cached) content = cached;
       else {
-        const converted = convertMcpToolContent({ content }, "structured") as Array<Record<string, any>>;
+        const converted = (managedExecutionRequired() ? managedToolResultContent(parseManagedToolResult({ content }))
+          : convertMcpToolContent({ content }, "structured")) as Array<Record<string, any>>;
         this.legacyImageResults.set(content, converted);
         content = converted;
       }
     }
     const maxChars = resolveToolResultMaxChars(name, spec.maxToolResultChars, spec.toolResultMaxCharsByName);
     try {
-      content = maybePersistToolResult(
+      if (!managedExecutionRequired()) content = maybePersistToolResult(
         spec.workspace ?? undefined,
         spec.sessionKey ?? "default",
         callId,
@@ -1062,7 +1064,8 @@ export class AgentRunner {
       }
     }
     for (const item of out) emitManagedToolEvent({ type: "tool_result", callId: item.call.id, name: item.call.name,
-      output: item.result, ok: item.event.status !== "error", ...(item.event.executionError ? { error: item.event.executionError } : {}) });
+      output: managedExecutionRequired() ? managedToolResultSummary(item.result) : item.result,
+      ok: item.event.status !== "error", ...(item.event.executionError ? { error: item.event.executionError } : {}) });
     return out;
   }
 
@@ -1080,7 +1083,12 @@ export class AgentRunner {
     if (managedExecutionRequired()) {
       try {
         const authorized = await executeManagedTool(call.name, call.arguments, spec.abortSignal, call.id);
-        return { call, result: authorized.result, event: { name: call.name, status: "ok" } };
+        if (authorized.result === undefined) throw new Error("Managed runtime execution result is missing");
+        const isError = typeof authorized.result !== "string" && authorized.result.isError === true;
+        const result = this.normalizeToolResult(spec, call.id, call.name, managedToolResultContent(authorized.result));
+        return { call, result, event: { name: call.name, status: isError ? "error" : "ok",
+          ...(isError ? { executionError: { kind: "execution", code: "managed_tool_reported_error" } } : {}) },
+          ...(isError ? { error: spec.failOnToolError ? new Error("Managed tool reported an execution error") : null } : {}) };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Managed runtime execution failed";
         return { call, result: `Error: ${message}`, event: { name: call.name, status: "error", detail: message,

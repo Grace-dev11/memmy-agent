@@ -1,4 +1,5 @@
 import { authenticateAgentRuntime, createManagedExecutionScope, managedExecutionRequired, withManagedExecution } from "../../core/agent-runtime/managed-execution.js";
+import { MANAGED_TOOL_RESULT_PROTOCOL } from "../../core/agent-runtime/managed-tool-result.js";
 import { requestTiming, withRequestTiming } from "../../utils/request-timing.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -529,7 +530,8 @@ export async function handleModels(request?: Request, ctx?: Pick<ApiContext, "mo
 }
 
 export async function handleHealth(): Promise<Response> {
-  return Response.json({ status: "ok", ...(managedExecutionRequired() ? { permissionProtocol: 1, managedExecutionProtocol: 2, managedExecutionRequired: true, macosSandbox: process.env.AGENT_MACOS_SANDBOX === "1" } : {}) });
+  return Response.json({ status: "ok", ...(managedExecutionRequired() ? { permissionProtocol: 1, managedExecutionProtocol: 2,
+    managedToolResultProtocol: MANAGED_TOOL_RESULT_PROTOCOL, managedExecutionRequired: true, macosSandbox: process.env.AGENT_MACOS_SANDBOX === "1" } : {}) });
 }
 
 export function createApp(

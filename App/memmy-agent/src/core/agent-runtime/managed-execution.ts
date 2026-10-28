@@ -1,8 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { MANAGED_TOOL_RESULT_PROTOCOL, parseManagedToolResult, readManagedExecutionResponse, type ManagedToolResult } from "./managed-tool-result.js";
 
 type ManagedTool = { name: string; description: string; inputSchema: Record<string, unknown> };
-type ManagedExecutionScope = { tools: ManagedTool[]; url: string; token: string; active: boolean; signal: AbortSignal; onEvent?: (event: Record<string, unknown>) => void };
+type ManagedExecutionScope = { tools: ManagedTool[]; url: string; token: string; active: boolean; signal: AbortSignal; toolResultProtocol?: 1; onEvent?: (event: Record<string, unknown>) => void };
 const scopes = new AsyncLocalStorage<ManagedExecutionScope>();
 const fileCalls = new AsyncLocalStorage<string>();
 
@@ -18,7 +19,10 @@ export async function withAuthorizedReadPath<T>(path: string, read: () => Promis
   const callId = randomUUID();
   emitManagedToolEvent({ type: "tool_call", callId, name: "read_file", input: { path } });
   try {
-    await executeManagedTool("authorize_read_path", { path }, undefined, callId, parentCallId);
+    const authorization = await executeManagedTool("authorize_read_path", { path }, undefined, callId, parentCallId);
+    if (authorization.result && typeof authorization.result !== "string" && authorization.result.isError) {
+      throw new ManagedExecutionError({ kind: "execution", code: "managed_tool_reported_error" });
+    }
     const result = await read();
     const scope = scopes.getStore();
     if (!scope?.active || scope.signal.aborted) throw new Error("Managed runtime run has ended");
@@ -69,7 +73,7 @@ export function authenticateAgentRuntime(request: Request): boolean {
 
 export function createManagedExecutionScope(value: unknown, signal: AbortSignal): ManagedExecutionScope {
   if (!value || typeof value !== "object") throw new Error("Managed runtime approval connection is required");
-  const input = value as { protocol?: unknown; tools?: unknown; url?: unknown; token?: unknown };
+  const input = value as { protocol?: unknown; tools?: unknown; url?: unknown; token?: unknown; toolResultProtocol?: unknown };
   if (input.protocol !== 2 || !Array.isArray(input.tools) || !input.tools.length || input.tools.some(tool =>
     !tool || typeof tool.name !== "string" || typeof tool.description !== "string" || !tool.inputSchema || typeof tool.inputSchema !== "object")) {
     throw new Error("Managed execution protocol 2 and tool definitions are required");
@@ -77,12 +81,16 @@ export function createManagedExecutionScope(value: unknown, signal: AbortSignal)
   if (typeof input.url !== "string" || typeof input.token !== "string" || !/^[a-f0-9]{64}$/u.test(input.token)) {
     throw new Error("Invalid managed runtime approval connection");
   }
+  if (input.toolResultProtocol !== undefined && input.toolResultProtocol !== MANAGED_TOOL_RESULT_PROTOCOL) {
+    throw new Error("Unsupported managed tool result protocol");
+  }
   const url = new URL(input.url);
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port
     || url.pathname !== "/authorize" || url.username || url.password || url.search || url.hash) {
     throw new Error("Managed runtime approval connection must be local");
   }
-  return { url: url.href, token: input.token, tools: structuredClone(input.tools), active: true, signal };
+  return { url: url.href, token: input.token, tools: structuredClone(input.tools), active: true, signal,
+    ...(input.toolResultProtocol === MANAGED_TOOL_RESULT_PROTOCOL ? { toolResultProtocol: MANAGED_TOOL_RESULT_PROTOCOL } : {}) };
 }
 
 export function managedToolDefinitions(): Record<string, unknown>[] {
@@ -102,7 +110,7 @@ export function withManagedExecution<T>(scope: ManagedExecutionScope | undefined
 }
 
 /** Outside the authenticated request scope, managed runtimes cannot execute tools. */
-export async function executeManagedTool(name: string, args: unknown, signal?: AbortSignal | null, callId: string = randomUUID(), parentCallId?: string): Promise<{ args: unknown; result?: string }> {
+export async function executeManagedTool(name: string, args: unknown, signal?: AbortSignal | null, callId: string = randomUUID(), parentCallId?: string): Promise<{ args: unknown; result?: string | ManagedToolResult }> {
   const scope = scopes.getStore();
   if (!scope) {
     if (managedExecutionRequired()) throw new Error("Managed runtime approval context is missing");
@@ -117,12 +125,13 @@ export async function executeManagedTool(name: string, args: unknown, signal?: A
     method: "POST", redirect: "error",
     headers: { "content-type": "application/json", authorization: `Bearer ${scope.token}` },
     body: JSON.stringify({ callId, toolName: name, args: approvedArgs,
+      ...(scope.toolResultProtocol ? { toolResultProtocol: scope.toolResultProtocol } : {}),
       ...(["read_file", "list_dir", "find_files", "grep", "authorize_read_path"].includes(name) ? { fileAccessProtocol: 1 } : {}),
       ...(parentCallId ? { parentCallId } : {}) }),
     signal: AbortSignal.any([scope.signal, ...(signal ? [signal] : []), AbortSignal.timeout(["web_fetch", "web_search"].includes(name) ? 815_000 : 125_000)])
   });
   if (!response.ok) throw new Error("Managed runtime approval service is unavailable");
-  const result = await response.json() as { decision?: string; reason?: string; result?: unknown; error?: { kind?: unknown; code?: unknown } };
+  const result = await readManagedExecutionResponse(response) as { decision?: string; reason?: string; result?: unknown; error?: { kind?: unknown; code?: unknown } };
   if (!scope.active || scope.signal.aborted || signal?.aborted) throw new Error("Managed runtime run has ended");
   if (result.error && ["permission", "execution"].includes(String(result.error.kind))
     && typeof result.error.code === "string" && /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/u.test(result.error.code)) {
@@ -135,8 +144,11 @@ export async function executeManagedTool(name: string, args: unknown, signal?: A
     }
     throw new Error(message);
   }
-  if (typeof result.result !== "string") throw new Error("Managed runtime execution result is missing");
-  return { args: approvedArgs, ...(typeof result.result === "string" ? { result: result.result } : {}) };
+  if (result.result === undefined) throw new Error("Managed runtime execution result is missing");
+  if (typeof result.result !== "string" && scope.toolResultProtocol !== MANAGED_TOOL_RESULT_PROTOCOL) {
+    throw new Error("Structured managed tool results require protocol 1");
+  }
+  return { args: approvedArgs, result: parseManagedToolResult(result.result) };
 }
 
 export function emitManagedToolEvent(event: Record<string, unknown>): void {
