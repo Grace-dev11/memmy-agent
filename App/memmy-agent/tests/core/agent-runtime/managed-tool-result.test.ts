@@ -4,7 +4,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createManagedExecutionScope, executeManagedTool, withManagedExecution, withManagedFileCall, withAuthorizedReadPath } from "../../../src/core/agent-runtime/managed-execution.js";
-import { managedToolResultContent, managedToolResultSummary, parseManagedToolResult, readManagedExecutionResponse } from "../../../src/core/agent-runtime/managed-tool-result.js";
+import { limitManagedToolResultText, managedToolResultContent, managedToolResultSummary, parseManagedToolResult, readManagedExecutionResponse } from "../../../src/core/agent-runtime/managed-tool-result.js";
 import { AgentRunner, AgentRunSpec } from "../../../src/core/agent-runtime/runner.js";
 import { ToolRegistry } from "../../../src/core/agent-runtime/tools/registry.js";
 import { ToolCallRequest } from "../../../src/providers/base.js";
@@ -84,6 +84,54 @@ it("drops late images after a turn ends or is cancelled", async () => {
     release(Response.json({ decision: "allow", result: image() }));
     await expect(pending).rejects.toThrow("run has ended");
   }
+});
+
+it("uses the same text budget for negotiated text blocks and legacy strings without writing caches", async () => {
+  vi.stubEnv("AGENT_MANAGED_EXECUTION_REQUIRED", "1");
+  const persistText = vi.spyOn(helpers, "maybePersistToolResult").mockImplementation(() => { throw new Error("native text write forbidden"); });
+  let output: unknown;
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ decision: "allow", result: output })));
+  const run = async (protocol?: 1, maxToolResultChars = 4) => {
+    const [result] = await withManagedExecution(scope(protocol), () => new AgentRunner().executeTools(new AgentRunSpec({ maxToolResultChars,
+      tools: { execute: vi.fn(), get: () => ({ readOnly: true }) } as any }),
+    [new ToolCallRequest({ id: "bounded", name: "read_file", arguments: {} })]));
+    return result.result;
+  };
+  output = "abcdefgh";
+  const legacy = await run();
+  expect(legacy).toBe("abcd\n... (truncated)"); expect(await run(1)).toBe(legacy);
+  output = { content: [{ type: "text", text: "abcdefgh" }] };
+  expect(await run(1)).toEqual([{ type: "text", text: legacy }]);
+  expect(await run(1, 0)).toEqual([{ type: "text", text: "abcdefgh" }]);
+  expect(persistText).not.toHaveBeenCalled();
+});
+
+it("shares one text budget across mixed blocks while preserving every image", async () => {
+  vi.stubEnv("AGENT_MANAGED_EXECUTION_REQUIRED", "1");
+  const storeImage = vi.spyOn(artifacts, "storeToolImageArtifact").mockImplementation(() => { throw new Error("native image write forbidden"); });
+  const persistText = vi.spyOn(helpers, "maybePersistToolResult").mockImplementation(() => { throw new Error("native text write forbidden"); });
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ decision: "allow", result: { content: [
+    { type: "text", text: "ab" }, image().content[1], { type: "text", text: "cdefgh" },
+    { type: "text", text: "must be omitted" }, image().content[1], { type: "text", text: "also omitted" },
+  ] } })));
+  const [result] = await withManagedExecution(scope(1), () => new AgentRunner().executeTools(new AgentRunSpec({ maxToolResultChars: 5,
+    tools: { execute: vi.fn(), get: () => ({ readOnly: true }) } as any }),
+  [new ToolCallRequest({ id: "mixed", name: "computer_use_snapshot", arguments: {} })]));
+  const picture = { type: "image_url", image_url: { url: `data:image/png;base64,${png}`, detail: "auto" } };
+  expect(result.result).toEqual([{ type: "text", text: "ab" }, picture, { type: "text", text: "cde\n... (truncated)" }, picture]);
+  expect(storeImage).not.toHaveBeenCalled(); expect(persistText).not.toHaveBeenCalled();
+});
+
+it("keeps image blocks after an exact text boundary and applies the budget idempotently", () => {
+  const picture = { type: "image_url", image_url: { url: `data:image/png;base64,${png}`, detail: "auto" } };
+  const original = [{ type: "text", text: "abcd" }, picture, { type: "text", text: "ef" }, picture];
+  const limited = limitManagedToolResultText(original, 4);
+  expect(limited).toEqual([{ type: "text", text: "abcd" }, picture, { type: "text", text: "\n... (truncated)" }, picture]);
+  expect(limited[1]).toBe(picture); expect(limited[3]).toBe(picture);
+  expect(limitManagedToolResultText(limited, 4)).toBe(limited);
+  expect(limitManagedToolResultText(original, 0)).toBe(original);
+  expect(limitManagedToolResultText(original, 6)).toBe(original);
+  expect(original[2]).toEqual({ type: "text", text: "ef" });
 });
 
 it("an error result cannot authorize the legacy path traversal helper to read a file", async () => {

@@ -66,6 +66,25 @@ export function managedToolResultContent(result: string | ManagedToolResult): st
   return blocks.length ? blocks : [{ type: "text", text: "(no output)" }];
 }
 
+/** Match the existing string budget across all text blocks without touching images
+ * or persisting overflow to a native file. Non-positive budgets retain legacy semantics. */
+export function limitManagedToolResultText(content: Array<Record<string, unknown>>, maxChars: number): Array<Record<string, unknown>> {
+  if (!(maxChars > 0) || !Number.isFinite(maxChars)) return content;
+  const length = content.reduce((total, block) => total + (block.type === "text" && typeof block.text === "string" ? block.text.length : 0), 0);
+  if (length <= maxChars) return content;
+  let remaining = Math.floor(maxChars), truncated = false, changed = false;
+  const limited: Array<Record<string, unknown>> = [];
+  for (const block of content) {
+    if (block.type !== "text" || typeof block.text !== "string") { limited.push(block); continue; }
+    if (truncated) { changed = true; continue; }
+    if (block.text.length <= remaining) { remaining -= block.text.length; limited.push(block); continue; }
+    const text = `${block.text.slice(0, remaining)}\n... (truncated)`;
+    limited.push(text === block.text ? block : { ...block, text });
+    changed ||= text !== block.text; truncated = true;
+  }
+  return changed ? limited : content;
+}
+
 /** The event stream is a text log, not a second image transport. */
 export function managedToolResultSummary(content: unknown): string {
   const blocks = Array.isArray(content) ? content : [content];

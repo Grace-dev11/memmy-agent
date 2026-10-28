@@ -1,5 +1,5 @@
 import { executeManagedTool, emitManagedToolEvent, managedExecutionRequired, ManagedExecutionError } from "./managed-execution.js";
-import { managedToolResultContent, managedToolResultSummary, parseManagedToolResult } from "./managed-tool-result.js";
+import { limitManagedToolResultText, managedToolResultContent, managedToolResultSummary, parseManagedToolResult } from "./managed-tool-result.js";
 import { requestTiming } from "../../utils/request-timing.js";
 import crypto from "node:crypto";
 import { redactBrowserAuthArguments } from "../../utils/browser-auth-privacy.js";
@@ -1022,6 +1022,7 @@ export class AgentRunner {
       }
     }
     const maxChars = resolveToolResultMaxChars(name, spec.maxToolResultChars, spec.toolResultMaxCharsByName);
+    if (managedExecutionRequired() && Array.isArray(content)) content = limitManagedToolResultText(content, maxChars);
     try {
       if (!managedExecutionRequired()) content = maybePersistToolResult(
         spec.workspace ?? undefined,
