@@ -50,6 +50,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm ci --prefix App/memmy-agent --ignore-scripts --no-audit --no-fund
+          npm rebuild better-sqlite3 --no-audit --no-fund
           npm rebuild better-sqlite3 --prefix App/memmy-agent --no-audit --no-fund
       - name: Typecheck and build the source Agent
         run: |
