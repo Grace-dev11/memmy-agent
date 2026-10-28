@@ -1,0 +1,85 @@
+name: Managed tool result protocol validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/managed-tool-result-protocol]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+          - runner: windows-2025
+            platform: win32
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      COPYFILE_DISABLE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.3
+          architecture: ${{ matrix.arch }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            App/memmy-agent/package-lock.json
+      - uses: actions/setup-go@v5
+        if: matrix.platform == 'win32'
+        with:
+          go-version: '1.22.12'
+          cache-dependency-path: App/native-computer-history/apps/OpenComputerHistoryWindows/go.mod
+      - name: Install the existing locked workspace and Agent dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --prefix App/memmy-agent --ignore-scripts --no-audit --no-fund
+          npm rebuild better-sqlite3 --prefix App/memmy-agent --no-audit --no-fund
+      - name: Typecheck and build the source Agent
+        run: |
+          npm --prefix App/memmy-agent run typecheck
+          npm --prefix App/memmy-agent run build
+      - name: Validate protocol, runner, API and image provider compatibility
+        working-directory: App/memmy-agent
+        run: >-
+          node node_modules/vitest/vitest.mjs run --maxWorkers=4
+          tests/core/agent-runtime/managed-tool-result.test.ts
+          tests/core/agent-runtime/managed-execution.test.ts
+          tests/core/agent-runtime/managed-file-access.test.ts
+          tests/core/agent-runtime/runner-tool-execution.test.ts
+          tests/core/agent-runtime/runner-image-text-fallback.test.ts
+          tests/core/agent-runtime/runner-core.test.ts
+          tests/providers/openai-compat-image-input.test.ts
+          tests/entrypoints/openai-like-api/openai-api.test.ts
+      - name: Build a local test runtime and verify live protocol negotiation and images
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: node scripts/internal/shared/validate-managed-tool-result-runtime.mjs "$RUNNER_TEMP/managed-tool-result-validation"
+      - name: Verify no lockfiles, protected packages or source were rewritten
+        run: git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        with:
+          name: managed-tool-result-test-runtime-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/managed-tool-result-validation/*.tgz
+            ${{ runner.temp }}/managed-tool-result-validation/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
