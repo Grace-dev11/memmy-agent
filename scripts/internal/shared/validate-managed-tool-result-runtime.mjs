@@ -3,15 +3,17 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundleRuntime } from "./bundle-runtime.mjs";
 
 const source = fileURLToPath(new URL("../../../", import.meta.url));
+// Git Bash's GNU tar interprets a Windows drive prefix as a remote host.
+const tar = process.platform === "win32" ? path.join(process.env.SystemRoot, "System32", "tar.exe") : "tar";
 const output = path.resolve(process.argv[2] ?? await mkdtemp(path.join(tmpdir(), "memmy-protocol-build-")));
-const runtime = path.join(output, "runtime"), packageDirectory = "App/memmy-agent";
+const runtime = path.join(output, "package"), packageDirectory = "App/memmy-agent";
 assert.equal(process.platform, process.env.EXPECTED_PLATFORM ?? process.platform);
 assert.equal(process.arch, process.env.EXPECTED_ARCH ?? process.arch);
 assert.equal(process.versions.node.split(".")[0], "22", "verify with the supported Node 22 runtime");
@@ -19,6 +21,33 @@ await mkdir(output, { recursive: true });
 const stats = await bundleRuntime({ source, destination: runtime, packageDirectory, kind: "agent", target: { platform: process.platform, arch: process.arch } });
 const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim();
 console.log(JSON.stringify({ step: "bundle", sourceCommit, platform: process.platform, arch: process.arch, ...stats }));
+// Preserve the bundler's exact dependency layout inside a directly installable
+// package. The thin CLI entry does not resolve or download any dependencies.
+const manifest = JSON.parse(await readFile(path.join(runtime, packageDirectory, "package.json"), "utf8"));
+const target = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
+await mkdir(path.join(runtime, "dist"), { recursive: true });
+await writeFile(path.join(runtime, "dist/main.js"), 'import "../App/memmy-agent/dist/main.js";\n');
+await writeFile(path.join(runtime, "package.json"), JSON.stringify({ name: "@memtensor/memmy-agent", version: manifest.version,
+  private: true, type: "module", bin: { memmy: "dist/main.js" }, engines: { node: ">=22" } }, null, 2) + "\n");
+await writeFile(path.join(runtime, "agent-runtime.json"), JSON.stringify({ name: "memmy-agent-runtime", version: manifest.version,
+  formatVersion: 1, target, entrypoint: "dist/main.js", nodeAbi: process.versions.modules,
+  sourceCommit, baseCommit: "167e199023ac59d245436d3cfb0dccbeb0651ace", testBuild: true, published: false,
+  nodeVersion: process.version, managedToolResultProtocol: 1 }, null, 2) + "\n");
+const archive = `memmy-managed-result-test-${sourceCommit.slice(0, 9)}-${target}.tgz`;
+execFileSync(tar, ["-czf", path.join(output, archive), "-C", output, "package"], { stdio: "inherit" });
+// Exercise the prebuilt file:.tgz install shape used by Desktop install:memmy:
+// extract package/, validate descriptor, place it under the scoped package name.
+const consumer = await mkdtemp(path.join(tmpdir(), "memmy-protocol-consumer-"));
+execFileSync(tar, ["-xzf", path.join(output, archive), "-C", consumer], { stdio: "inherit" });
+const installed = path.join(consumer, "node_modules/@memtensor/memmy-agent");
+await mkdir(path.dirname(installed), { recursive: true });
+await rename(path.join(consumer, "package"), installed);
+const installedManifest = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
+const descriptor = JSON.parse(await readFile(path.join(installed, "agent-runtime.json"), "utf8"));
+assert.equal(installedManifest.name, "@memtensor/memmy-agent"); assert.equal(installedManifest.bin.memmy, "dist/main.js");
+assert.equal(descriptor.name, "memmy-agent-runtime"); assert.equal(descriptor.formatVersion, 1);
+assert.equal(descriptor.version, installedManifest.version); assert.equal(descriptor.target, target);
+assert.equal(descriptor.entrypoint, "dist/main.js"); assert.equal(descriptor.nodeAbi, process.versions.modules);
 
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jIioAAAAASUVORK5CYII=";
 const tool = { name: "product_snapshot_fixture", description: "Return the registered product test snapshot", inputSchema: { type: "object", properties: {}, additionalProperties: false } };
@@ -58,7 +87,7 @@ const reserve = createServer(); await new Promise(resolve => reserve.listen(0, "
 const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
 const token = "b".repeat(64), approvalToken = "a".repeat(64);
 let stderr = "", exited = false;
-const child = spawn(process.execPath, [path.join(runtime, packageDirectory, "dist/main.js"), "serve", "--host", "127.0.0.1", "--port", String(port), "--config", config, "--workspace", workspace], {
+const child = spawn(process.execPath, [path.join(installed, descriptor.entrypoint), "serve", "--host", "127.0.0.1", "--port", String(port), "--config", config, "--workspace", workspace], {
   cwd: home, stdio: ["ignore", "pipe", "pipe"], env: {
     PATH: process.env.PATH ?? "", HOME: home, USERPROFILE: home, OPENAI_API_KEY: "model-test", MEMMY_AGENT_DATA_DIR: path.join(home, "data"),
     AGENT_MANAGED_EXECUTION_REQUIRED: "1", AGENT_RUNTIME_TOKEN: token, MEMMY_COMPUTER_HISTORY: "0",
@@ -98,10 +127,8 @@ try {
     assert.equal(authorization[0].body.toolResultProtocol, mode === "image" ? 1 : undefined);
   }
   assert.deepEqual(errors, []);
-  await writeFile(path.join(runtime, "test-build.json"), JSON.stringify({ sourceCommit, baseCommit: "167e199023ac59d245436d3cfb0dccbeb0651ace", testBuild: true, published: false,
-    platform: process.platform, arch: process.arch, nodeVersion: process.version, managedToolResultProtocol: health.managedToolResultProtocol,
-    verified: ["bundled-health-negotiation", "bundled-image-model-round-trip", "legacy-string-compatibility"] }, null, 2) + "\n");
-  console.log(JSON.stringify({ step: "runtime-verification", platform: process.platform, arch: process.arch, health, imageRoundTrip: true, legacyStringRoundTrip: true }));
+  console.log(JSON.stringify({ step: "runtime-verification", platform: process.platform, arch: process.arch, installedPackage: installedManifest.name,
+    sourceCommit: descriptor.sourceCommit, health, imageRoundTrip: true, legacyStringRoundTrip: true }));
 } finally {
   child.kill();
   for (let attempt = 0; attempt < 40 && !exited; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
@@ -109,9 +136,8 @@ try {
   child.stdout.destroy(); child.stderr.destroy();
   await new Promise(resolve => { model.closeAllConnections(); model.close(resolve); });
   await rm(home, { recursive: true, force: true, maxRetries: 5 });
+  await rm(consumer, { recursive: true, force: true, maxRetries: 5 });
 }
-const archive = `memmy-managed-result-test-${sourceCommit.slice(0, 9)}-${process.platform}-${process.arch}.tgz`;
-execFileSync("tar", ["-czf", path.join(output, archive), "-C", output, "runtime"], { stdio: "inherit" });
 const digest = createHash("sha256").update(await readFile(path.join(output, archive))).digest("hex");
 await writeFile(path.join(output, `${archive}.sha256`), `${digest}  ${archive}\n`);
 console.log(JSON.stringify({ step: "test-artifact", archive, sha256: digest }));
