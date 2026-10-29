@@ -242,7 +242,6 @@ const projectCreateMenuSize: SidebarMenuSize = {
 };
 const sidebarMenuOverlayZIndex = 9999;
 const SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH = 10;
-const SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH = 12;
 const ACCOUNT_DISPLAY_ELLIPSIS = "…";
 const standaloneRenderTaskStateCoordinator: AgentTaskStateCoordinator = {
   refreshTaskState: () => undefined,
@@ -330,7 +329,6 @@ export function AppFrame(props: AppFrameProps) {
     unsetMeta: t("appFrame.unsetMeta")
   });
   const accountNameLine = truncateAccountDisplayText(accountSummary.name, SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH);
-  const accountMetaLine = truncateAccountDisplayText(accountSummary.meta, SIDEBAR_PROFILE_META_MAX_VISUAL_WIDTH);
   const sidebarUpdateAction = resolveSidebarUpdateAction(update, t);
   const visibleTasks = state.agent.tasks;
   const projectTree = useMemo(
@@ -1442,11 +1440,6 @@ export function AppFrame(props: AppFrameProps) {
                     fullText={accountSummary.name}
                     line={accountNameLine}
                   />
-                  <SidebarProfileTextLine
-                    className="app-frame-profile-meta text-text-ink/45 truncate"
-                    fullText={accountSummary.meta}
-                    line={accountMetaLine}
-                  />
                 </span>
               </span>
             </button>
@@ -1496,11 +1489,6 @@ export function AppFrame(props: AppFrameProps) {
                   className="app-frame-profile-name text-text-ink/70 truncate"
                   fullText={accountSummary.name}
                   line={accountNameLine}
-                />
-                <SidebarProfileTextLine
-                  className="app-frame-profile-meta text-text-ink/45 truncate"
-                  fullText={accountSummary.meta}
-                  line={accountMetaLine}
                 />
               </span>
               <span

@@ -552,6 +552,7 @@ describe("AppFrame", () => {
     expect(html).toContain('aria-label="设置"');
     expect(html).toContain('data-icon="user"');
     expect(html).toContain('data-icon="settings-2"');
+    expect(html).not.toContain("app-frame-profile-meta");
     expect(source).not.toContain('className={`app-frame-profile-settings shrink-0 inline-flex items-center justify-center transition-colors cursor-pointer');
   });
 
